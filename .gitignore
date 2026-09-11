@@ -1,0 +1,12 @@
+# Environment variables & API keys
+.env
+*.env
+
+# Dependencies
+node_modules/
+venv/
+env/
+
+# System & OS metadata
+.DS_Store
+Thumbs.db
