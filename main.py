@@ -76,21 +76,16 @@ def analyze(message: Message):
     response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=30)
     result = response.json()
 
-    # TEMPORARY DEBUG LINE — prints the raw response to Render's Logs tab
-    # so we can see exactly what Hugging Face sent back. Remove once working.
-    print("HF raw response:", result)
-
-    if "labels" not in result:
-        # The model may still be "waking up" on Hugging Face's side the
-        # very first time it's called — this gives a clear message instead
-        # of crashing.
+    # The new Hugging Face router API returns a LIST of {"label": ..., "score": ...}
+    # dicts, sorted highest-confidence first — different from the old format.
+    if not isinstance(result, list) or len(result) == 0 or "label" not in result[0]:
         return {
             "error": "Model is loading on Hugging Face's servers, try again in ~20 seconds.",
             "raw_response": result,
         }
 
-    top_label = result["labels"][0]
-    top_score = result["scores"][0]
+    top_label = result[0]["label"]
+    top_score = result[0]["score"]
     tier_info = LABEL_TO_TIER[top_label]
 
     return {
@@ -101,8 +96,8 @@ def analyze(message: Message):
         "tier": tier_info["tier"],
         "recommended_action": tier_info["action"],
         "all_scores": [
-            {"label": l, "score": round(s, 3)}
-            for l, s in zip(result["labels"], result["scores"])
+            {"label": r["label"], "score": round(r["score"], 3)}
+            for r in result
         ],
     }
 
