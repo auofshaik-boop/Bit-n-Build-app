@@ -47,6 +47,15 @@ CANDIDATE_LABELS = [
     "normal safe conversation",
 ]
 
+SAFE_LABEL = "normal safe conversation"
+
+# How confident the model needs to be before we trust a non-safe label.
+# Zero-shot models ALWAYS pick a "winner" out of the candidate labels, even
+# when none of them really apply — a low-confidence guess (e.g. 20%) is not
+# the same thing as the model actually detecting something. Anything below
+# this threshold gets treated as safe instead of escalated.
+CONFIDENCE_THRESHOLD = 0.55
+
 # Two dimensions on purpose:
 #   "tier"       — decides WHAT the app does (which UI behavior fires)
 #   "risk_class" — explains WHY, grouping categories by what kind of risk
@@ -86,7 +95,7 @@ LABEL_TO_TIER = {
         "tier": 3,
         "action": "Immediate hard safety pause: evidence saved instantly, chat minimized, parent alerted — treated as the highest-severity category.",
     },
-    "normal safe conversation": {
+    SAFE_LABEL: {
         "category": "SAFE_CHAT",
         "risk_class": "SAFE",
         "tier": 0,
@@ -119,6 +128,30 @@ def save_incident(incident: dict):
         json.dump(incidents, f, indent=2)
 
 
+def _safe_response(text: str, confidence: float = 1.0, note: str = None, error: str = None, raw_response=None):
+    """Build a 'treat as safe' response. Used by every fallback path below,
+    so a short message, a network hiccup, or a slow-loading model all fail
+    to Tier 0 (safe) instead of ever accidentally defaulting to Tier 3."""
+    tier_info = LABEL_TO_TIER[SAFE_LABEL]
+    response = {
+        "input_text": text,
+        "matched_label": SAFE_LABEL,
+        "confidence": round(confidence, 3),
+        "category": tier_info["category"],
+        "risk_class": tier_info["risk_class"],
+        "tier": tier_info["tier"],
+        "recommended_action": tier_info["action"],
+        "all_scores": [],
+    }
+    if note:
+        response["note"] = note
+    if error:
+        response["error"] = error
+    if raw_response is not None:
+        response["raw_response"] = raw_response
+    return response
+
+
 @app.post("/log_incident")
 def log_incident(incident: Incident):
     """
@@ -149,29 +182,56 @@ def get_incidents():
 
 @app.post("/analyze")
 def analyze(message: Message):
+    text = message.text.strip()
+
+    # --- FIX 1: short-message pre-filter -----------------------------------
+    # A message like "Hey" or "lol" has no real content to classify. Rather
+    # than forcing the model to guess a "danger" category for near-empty
+    # text, treat anything at or under 2 words as safe and skip the API
+    # call entirely (also saves you a Hugging Face request).
+    if len(text.split()) <= 2:
+        return _safe_response(text, confidence=1.0, note="Skipped model call: message too short to meaningfully classify.")
+
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     payload = {
-        "inputs": message.text,
+        "inputs": text,
         "parameters": {"candidate_labels": CANDIDATE_LABELS},
     }
 
-    response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=30)
-    result = response.json()
+    # --- FIX 2: network/timeout errors fail SAFE, not Tier 3 ---------------
+    try:
+        response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=30)
+        result = response.json()
+    except requests.exceptions.RequestException:
+        return _safe_response(text, confidence=0.0, error="Could not reach the classification model — treated as safe by default.")
 
-    # The new Hugging Face router API returns a LIST of {"label": ..., "score": ...}
-    # dicts, sorted highest-confidence first — different from the old format.
+    # The Hugging Face router API returns a LIST of {"label": ..., "score": ...}
+    # dicts, sorted highest-confidence first. If it's not shaped like that,
+    # the model is probably still loading on their servers.
     if not isinstance(result, list) or len(result) == 0 or "label" not in result[0]:
-        return {
-            "error": "Model is loading on Hugging Face's servers, try again in ~20 seconds.",
-            "raw_response": result,
-        }
+        return _safe_response(
+            text,
+            confidence=0.0,
+            error="Model is loading on Hugging Face's servers, try again in ~20 seconds.",
+            raw_response=result,
+        )
 
     top_label = result[0]["label"]
     top_score = result[0]["score"]
+
+    # --- FIX 3: confidence threshold ----------------------------------------
+    # Zero-shot models always produce a "top" label, even when none of the
+    # candidates genuinely apply. If the top score doesn't clear the
+    # threshold, don't trust it — fall back to safe instead of escalating
+    # on a low-confidence guess.
+    if top_label != SAFE_LABEL and top_score < CONFIDENCE_THRESHOLD:
+        top_label = SAFE_LABEL
+        top_score = result[0]["score"]  # keep the original score for transparency
+
     tier_info = LABEL_TO_TIER[top_label]
 
     return {
-        "input_text": message.text,
+        "input_text": text,
         "matched_label": top_label,
         "confidence": round(top_score, 3),
         "category": tier_info["category"],
