@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sentinel — Live Demo</title>
+<style>
+  :root {
+    --safe: #2e7d32;
+    --tier1: #f9a825;
+    --tier2: #ef6c00;
+    --tier3: #c62828;
+    --bg: #0f172a;
+    --card: #1e293b;
+    --text: #e2e8f0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    padding: 40px 20px;
+  }
+  .app { max-width: 640px; width: 100%; }
+  h1 { font-size: 1.8rem; margin-bottom: 4px; }
+  p.subtitle { color: #94a3b8; margin-top: 0; }
+  .chat-window {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 20px;
+    min-height: 120px;
+    margin-bottom: 16px;
+    transition: filter 0.3s ease;
+  }
+  .chat-window.tier3-blur { filter: blur(6px); pointer-events: none; }
+  #messages { display: flex; flex-direction: column; gap: 10px; }
+  .msg-bubble {
+    background: #334155;
+    padding: 10px 14px;
+    border-radius: 10px;
+    max-width: 80%;
+  }
+  .input-row { display: flex; gap: 8px; position: relative; }
+  input[type=text] {
+    flex: 1;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid #334155;
+    background: #0b1220;
+    color: var(--text);
+    font-size: 1rem;
+  }
+  input[type=text]:disabled { opacity: 0.5; }
+  button {
+    padding: 12px 20px;
+    border: none;
+    border-radius: 10px;
+    background: #3b82f6;
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { background: #2563eb; }
+  .banner {
+    margin-top: 16px;
+    padding: 14px 16px;
+    border-radius: 10px;
+    font-weight: 600;
+    display: none;
+  }
+  .banner.show { display: block; }
+  .tier0 { background: rgba(46,125,50,0.15); border: 1px solid var(--safe); color: var(--safe); }
+  .tier1 { background: rgba(249,168,37,0.15); border: 1px solid var(--tier1); color: var(--tier1); }
+  .tier2 { background: rgba(239,108,0,0.15); border: 1px solid var(--tier2); color: var(--tier2); }
+  .tier3 { background: rgba(198,40,40,0.15); border: 1px solid var(--tier3); color: var(--tier3); }
+  .meta { font-size: 0.85rem; color: #94a3b8; margin-top: 6px; }
+  .lockdown-overlay {
+    position: fixed; inset: 0;
+    background: rgba(15,23,42,0.92);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    text-align: center;
+    padding: 20px;
+    z-index: 10;
+  }
+  .lockdown-overlay.show { display: flex; }
+  .lockdown-overlay h2 { color: var(--tier3); }
+  .countdown { font-size: 2rem; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>🛡️ Sentinel</h1>
+  <p class="subtitle">Type a message a stranger might send in a game chat. Sentinel evaluates it live.</p>
+
+  <div class="chat-window" id="chatWindow">
+    <div id="messages"></div>
+  </div>
+
+  <div class="input-row">
+    <input type="text" id="msgInput" placeholder="e.g. 'add me on snap, whats your username there'" />
+    <button onclick="sendMessage()">Send</button>
+  </div>
+
+  <div class="banner" id="banner"></div>
+
+  <p class="meta">Try: "hey what school do you go to" · "lets talk on whatsapp instead" · "you're so mature for your age, dont tell your parents" · "lol yeah same, this game is fun"</p>
+</div>
+
+<div class="lockdown-overlay" id="lockdownOverlay">
+  <h2>⚠️ Safety Pause</h2>
+  <p>This conversation included a request to move to another app.<br>Pausing chat and notifying a parent.</p>
+  <div class="countdown" id="countdownText">3</div>
+</div>
+
+<script>
+const API_URL = "http://127.0.0.1:8000/analyze";
+
+async function sendMessage() {
+  const input = document.getElementById("msgInput");
+  const text = input.value.trim();
+  if (!text) return;
+
+  addMessageBubble(text);
+  input.value = "";
+
+  try {
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text })
+    });
+    const data = await res.json();
+    handleResult(data);
+  } catch (err) {
+    showBanner("tier0", "⚠️ Couldn't reach Sentinel API — is main.py running on port 8000?");
+  }
+}
+
+function addMessageBubble(text) {
+  const messages = document.getElementById("messages");
+  const bubble = document.createElement("div");
+  bubble.className = "msg-bubble";
+  bubble.textContent = text;
+  messages.appendChild(bubble);
+}
+
+function handleResult(data) {
+  const tierClass = "tier" + data.tier;
+  const label = {
+    0: "✅ Safe",
+    1: "🟡 Tier 1 — Subtle Risk",
+    2: "🟠 Tier 2 — PII Request",
+    3: "🔴 Tier 3 — Contact Switching / Critical"
+  }[data.tier];
+
+  showBanner(tierClass, `${label} — "${data.category}" (${(data.confidence*100).toFixed(1)}% confidence)\n${data.recommended_action}`);
+
+  if (data.tier === 2) {
+    softLockInput(3);
+  }
+  if (data.tier === 3) {
+    triggerLockdown();
+  }
+}
+
+function showBanner(cls, text) {
+  const banner = document.getElementById("banner");
+  banner.className = "banner show " + cls;
+  banner.style.whiteSpace = "pre-line";
+  banner.textContent = text;
+}
+
+function softLockInput(seconds) {
+  const input = document.getElementById("msgInput");
+  input.disabled = true;
+  let remaining = seconds;
+  const original = input.placeholder;
+  const interval = setInterval(() => {
+    input.placeholder = `Checking message... sending in ${remaining}s`;
+    remaining--;
+    if (remaining < 0) {
+      clearInterval(interval);
+      input.disabled = false;
+      input.placeholder = original;
+    }
+  }, 1000);
+}
+
+function triggerLockdown() {
+  document.getElementById("chatWindow").classList.add("tier3-blur");
+  const overlay = document.getElementById("lockdownOverlay");
+  overlay.classList.add("show");
+  let count = 3;
+  const countdownEl = document.getElementById("countdownText");
+  const interval = setInterval(() => {
+    count--;
+    countdownEl.textContent = count;
+    if (count <= 0) {
+      clearInterval(interval);
+      overlay.classList.remove("show");
+      document.getElementById("chatWindow").classList.remove("tier3-blur");
+      // In the real app: this is where a push notification would fire to the parent's phone.
+    }
+  }, 1000);
+}
+
+document.getElementById("msgInput").addEventListener("keypress", (e) => {
+  if (e.key === "Enter") sendMessage();
+});
+</script>
+</body>
+</html>
