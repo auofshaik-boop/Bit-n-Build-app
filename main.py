@@ -76,6 +76,10 @@ def analyze(message: Message):
     response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=30)
     result = response.json()
 
+    # TEMPORARY DEBUG LINE — prints the raw response to Render's Logs tab
+    # so we can see exactly what Hugging Face sent back. Remove once working.
+    print("HF raw response:", result)
+
     if "labels" not in result:
         # The model may still be "waking up" on Hugging Face's side the
         # very first time it's called — this gives a clear message instead
