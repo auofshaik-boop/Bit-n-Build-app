@@ -118,7 +118,9 @@
 </div>
 
 <script>
-const API_URL = "http://127.0.0.1:8000/analyze";
+// Relative path — works both locally AND once deployed, since the
+// frontend and backend are now served from the same app/URL.
+const API_URL = "/analyze";
 
 async function sendMessage() {
   const input = document.getElementById("msgInput");
