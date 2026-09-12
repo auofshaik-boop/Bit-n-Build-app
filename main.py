@@ -62,11 +62,11 @@ SAFE_LABEL = "normal safe conversation"
 # a message that WINS the top spot has already beaten "safe" head-to-head,
 # even at a score like 35%.
 CATEGORY_THRESHOLDS = {
-    "asking for personal information like home address, school name, or real name": 0.20,
-    "asking to switch to another app like Snapchat, WhatsApp, or phone number": 0.20,
+    "asking for personal information like home address, school name, or real name": 0.30,
+    "asking to switch to another app like Snapchat, WhatsApp, or phone number": 0.30,
     "pressuring someone to keep a secret from their parents, isolating them from friends and family, or giving unusual personal compliments to build trust": 0.40,
-    "explicit sexual content or sexual solicitation": 0.15,
-    "threats, coercion, blackmail, or intimidation to force compliance": 0.15,
+    "explicit sexual content or sexual solicitation": 0.30,
+    "threats, coercion, blackmail, or intimidation to force compliance": 0.55,
 }
 
 # When more than one category clears its threshold, we deliberately prefer
