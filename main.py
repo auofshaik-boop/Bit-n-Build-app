@@ -39,7 +39,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HF_API_URL = "https://router.huggingface.co/hf-inference/models/facebook/bart-large-mnli"
 
 CANDIDATE_LABELS = [
-    "sharing personal information like address or school",
+    "asking for personal information like home address, school name, or real name",
     "asking to switch to another app like Snapchat, WhatsApp, or phone number",
     "manipulative pressure, flattery, or secrecy",
     "explicit sexual content or sexual solicitation",
@@ -51,10 +51,24 @@ SAFE_LABEL = "normal safe conversation"
 
 # How confident the model needs to be before we trust a non-safe label.
 # Zero-shot models ALWAYS pick a "winner" out of the candidate labels, even
-# when none of them really apply — a low-confidence guess (e.g. 20%) is not
-# the same thing as the model actually detecting something. Anything below
-# this threshold gets treated as safe instead of escalated.
-CONFIDENCE_THRESHOLD = 0.55
+# when none of them really apply — a low-confidence guess is not the same
+# thing as the model actually detecting something. Anything below the
+# relevant threshold below gets treated as safe instead of escalated.
+#
+# IMPORTANT: these thresholds are NOT the same for every category, and
+# that's deliberate. A false positive on "Hey" (wrongly flagged) just costs
+# an annoying overreaction. A false negative on real sexual solicitation or
+# threats (wrongly cleared as safe) means the system does nothing for
+# genuinely dangerous content. Those two mistakes are not equally bad, so
+# the highest-severity categories get a much lower bar to trigger than
+# lower-stakes ones like PII sharing or manipulation.
+CATEGORY_THRESHOLDS = {
+    "asking for personal information like home address, school name, or real name": 0.40,
+    "asking to switch to another app like Snapchat, WhatsApp, or phone number": 0.45,
+    "manipulative pressure, flattery, or secrecy": 0.55,
+    "explicit sexual content or sexual solicitation": 0.30,
+    "threats, coercion, blackmail, or intimidation to force compliance": 0.30,
+}
 
 # Two dimensions on purpose:
 #   "tier"       — decides WHAT the app does (which UI behavior fires)
@@ -65,7 +79,7 @@ CONFIDENCE_THRESHOLD = 0.55
 #                  severity, different underlying nature — worth knowing
 #                  even though the immediate action taken is the same.
 LABEL_TO_TIER = {
-    "sharing personal information like address or school": {
+    "asking for personal information like home address, school name, or real name": {
         "category": "PII_SHARING",
         "risk_class": "PRIVACY_RISK",
         "tier": 2,
@@ -219,14 +233,17 @@ def analyze(message: Message):
     top_label = result[0]["label"]
     top_score = result[0]["score"]
 
-    # --- FIX 3: confidence threshold ----------------------------------------
+    # --- FIX 3: per-category confidence threshold ---------------------------
     # Zero-shot models always produce a "top" label, even when none of the
     # candidates genuinely apply. If the top score doesn't clear the
-    # threshold, don't trust it — fall back to safe instead of escalating
-    # on a low-confidence guess.
-    if top_label != SAFE_LABEL and top_score < CONFIDENCE_THRESHOLD:
-        top_label = SAFE_LABEL
-        top_score = result[0]["score"]  # keep the original score for transparency
+    # threshold FOR THAT SPECIFIC CATEGORY, don't trust it — fall back to
+    # safe instead of escalating on a low-confidence guess. High-severity
+    # categories use a lower bar on purpose (see CATEGORY_THRESHOLDS above).
+    if top_label != SAFE_LABEL:
+        required_threshold = CATEGORY_THRESHOLDS.get(top_label, 0.55)
+        if top_score < required_threshold:
+            top_label = SAFE_LABEL
+            top_score = result[0]["score"]  # keep the original score for transparency
 
     tier_info = LABEL_TO_TIER[top_label]
 
