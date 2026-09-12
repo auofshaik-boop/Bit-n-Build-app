@@ -1,23 +1,22 @@
 """
 Sentinel — Real-Time Child Safety Chat Copilot
-Deployment-ready version: serves BOTH the API and the demo frontend
-from a single app, so you get one URL for everything.
+LIGHTWEIGHT deployment version.
 
-Local run:
-    pip install -r requirements.txt
-    uvicorn main:app --reload
-    Then open http://127.0.0.1:8000 in your browser (not index.html directly!)
+Instead of downloading and running the AI model on our own server (which
+needs more RAM than Render's free tier gives us), this version sends each
+message to Hugging Face's own hosted servers and gets the classification
+back over the internet. Our app stays small and fits comfortably in 512MB.
 
-Render deployment:
-    Start command: uvicorn main:app --host 0.0.0.0 --port $PORT
+Needs one environment variable set on Render: HF_TOKEN
+(a free Hugging Face API token — see deployment instructions)
 """
 
+import os
+import requests
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from transformers import pipeline
 
 app = FastAPI(title="Sentinel API")
 
@@ -28,14 +27,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# NOTE: using a smaller model than the original bart-large-mnli.
-# bart-large-mnli is ~1.6GB and needs more RAM than free hosting tiers give you.
-# typeform/distilbert-base-uncased-mnli does the same zero-shot job at a
-# fraction of the size (~260MB), so it actually fits on a free server.
-classifier = pipeline(
-    "zero-shot-classification",
-    model="typeform/distilbert-base-uncased-mnli",
-)
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+HF_API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
 
 CANDIDATE_LABELS = [
     "sharing personal information like address or school",
@@ -74,7 +67,24 @@ class Message(BaseModel):
 
 @app.post("/analyze")
 def analyze(message: Message):
-    result = classifier(message.text, candidate_labels=CANDIDATE_LABELS)
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    payload = {
+        "inputs": message.text,
+        "parameters": {"candidate_labels": CANDIDATE_LABELS},
+    }
+
+    response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=30)
+    result = response.json()
+
+    if "labels" not in result:
+        # The model may still be "waking up" on Hugging Face's side the
+        # very first time it's called — this gives a clear message instead
+        # of crashing.
+        return {
+            "error": "Model is loading on Hugging Face's servers, try again in ~20 seconds.",
+            "raw_response": result,
+        }
+
     top_label = result["labels"][0]
     top_score = result["scores"][0]
     tier_info = LABEL_TO_TIER[top_label]
@@ -93,8 +103,6 @@ def analyze(message: Message):
     }
 
 
-# Serve index.html at the root URL, so the whole app is reachable
-# from ONE single link (both frontend and backend together).
 @app.get("/")
 def serve_frontend():
     return FileResponse("index.html")
