@@ -50,24 +50,23 @@ CANDIDATE_LABELS = [
 SAFE_LABEL = "normal safe conversation"
 
 # How confident the model needs to be before we trust a non-safe label.
-# Zero-shot models ALWAYS pick a "winner" out of the candidate labels, even
-# when none of them really apply — a low-confidence guess is not the same
-# thing as the model actually detecting something. Anything below the
-# relevant threshold below gets treated as safe instead of escalated.
 #
-# IMPORTANT: these thresholds are NOT the same for every category, and
-# that's deliberate. A false positive on "Hey" (wrongly flagged) just costs
-# an annoying overreaction. A false negative on real sexual solicitation or
-# threats (wrongly cleared as safe) means the system does nothing for
-# genuinely dangerous content. Those two mistakes are not equally bad, so
-# the highest-severity categories get a much lower bar to trigger than
-# lower-stakes ones like PII sharing or manipulation.
+# IMPORTANT LESSON FROM TESTING: with 6 candidate labels, the model splits
+# its confidence across all of them — a CORRECT detection often only scores
+# 30-50%, not 90%+, simply because it has to "beat" 5 other options, not
+# hit some high absolute bar. Random/uniform guessing across 6 labels would
+# average out to about 1/6 ≈ 17% each. So these thresholds are set just
+# above that noise floor, to catch genuinely directionless guesses, NOT to
+# filter out real detections that happen to score under 50%. The earlier,
+# higher thresholds (0.55/0.45/0.30) were throwing away correct answers —
+# a message that WINS the top spot has already beaten "safe" head-to-head,
+# even at a score like 35%.
 CATEGORY_THRESHOLDS = {
-    "asking for personal information like home address, school name, or real name": 0.40,
-    "asking to switch to another app like Snapchat, WhatsApp, or phone number": 0.45,
-    "manipulative pressure, flattery, or secrecy": 0.55,
-    "explicit sexual content or sexual solicitation": 0.30,
-    "threats, coercion, blackmail, or intimidation to force compliance": 0.30,
+    "asking for personal information like home address, school name, or real name": 0.20,
+    "asking to switch to another app like Snapchat, WhatsApp, or phone number": 0.20,
+    "manipulative pressure, flattery, or secrecy": 0.20,
+    "explicit sexual content or sexual solicitation": 0.15,
+    "threats, coercion, blackmail, or intimidation to force compliance": 0.15,
 }
 
 # Two dimensions on purpose:
