@@ -90,6 +90,31 @@
   .lockdown-overlay.show { display: flex; }
   .lockdown-overlay h2 { color: var(--tier3); }
   .countdown { font-size: 2rem; margin-top: 10px; }
+  .tier2-panel {
+    display: none;
+    margin-top: 12px;
+    padding: 16px;
+    border-radius: 10px;
+    background: rgba(239,108,0,0.1);
+    border: 1px solid var(--tier2);
+  }
+  .tier2-panel.show { display: block; }
+  .tier2-panel p { margin: 0 0 10px; color: var(--tier2); font-size: 14px; }
+  .tier2-buttons { display: flex; gap: 8px; }
+  .btn-send-anyway {
+    background: transparent;
+    border: 1px solid #94a3b8;
+    color: #94a3b8;
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+  .btn-send-anyway:hover { background: #334155; }
+  .btn-dont-send {
+    background: var(--safe);
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+  .btn-dont-send:hover { background: #256428; }
 </style>
 </head>
 <body>
@@ -108,12 +133,21 @@
 
   <div class="banner" id="banner"></div>
 
-  <p class="meta">Try: "hey what school do you go to" · "lets talk on whatsapp instead" · "you're so mature for your age, dont tell your parents" · "lol yeah same, this game is fun"</p>
+  <div class="tier2-panel" id="tier2Panel">
+    <p id="tier2Message">Personal details like this can be used to find you in real life.</p>
+    <div class="tier2-buttons">
+      <button class="btn-dont-send" onclick="handleDontSend()">Don't send</button>
+      <button class="btn-send-anyway" onclick="handleSendAnyway()">Send anyway</button>
+    </div>
+  </div>
+
+  <p class="meta">Try: "hey what school do you go to" · "lets talk on whatsapp instead" · "you're so mature for your age, dont tell your parents" · "if you dont send it ill tell everyone" · "lol yeah same, this game is fun"</p>
 </div>
 
 <div class="lockdown-overlay" id="lockdownOverlay">
   <h2>⚠️ Safety Pause</h2>
-  <p>This conversation included a request to move to another app.<br>Pausing chat and notifying a parent.</p>
+  <p id="lockdownReason">This conversation included a request to move to another app.<br>Pausing chat and notifying a parent.</p>
+  <p style="font-size: 13px; color: #4ade80; margin-top: 10px;">✓ Evidence saved — preserved even if the other person deletes their messages</p>
   <div class="countdown" id="countdownText">3</div>
 </div>
 
@@ -121,6 +155,12 @@
 // Relative path — works both locally AND once deployed, since the
 // frontend and backend are now served from the same app/URL.
 const API_URL = "/analyze";
+
+// Tracks how many times THIS session has triggered a PII (Tier 2) request.
+// A single slip-up is treated differently from a repeated pattern —
+// applying the "trajectory, not one message" principle to Tier 2 too.
+let piiAttemptCount = 0;
+let pendingTier2Message = null; // holds the message data while waiting on the user's choice
 
 async function sendMessage() {
   const input = document.getElementById("msgInput");
@@ -157,16 +197,66 @@ function handleResult(data) {
     0: "✅ Safe",
     1: "🟡 Tier 1 — Subtle Risk",
     2: "🟠 Tier 2 — PII Request",
-    3: "🔴 Tier 3 — Contact Switching / Critical"
+    3: "🔴 Tier 3 — Critical Risk"
   }[data.tier];
 
-  showBanner(tierClass, `${label} — "${data.category}" (${(data.confidence*100).toFixed(1)}% confidence)\n${data.recommended_action}`);
+  const riskClassLabel = {
+    "PRIVACY_RISK": "Privacy Risk",
+    "ESCALATION_PATHWAY": "Escalation Pathway",
+    "MANIPULATION": "Manipulation",
+    "HARMFUL_CONTENT": "Harmful Content",
+    "SAFE": "Safe"
+  }[data.risk_class] || data.risk_class;
+
+  showBanner(tierClass, `${label} — "${data.category}" · ${riskClassLabel} (${(data.confidence*100).toFixed(1)}% confidence)\n${data.recommended_action}`);
 
   if (data.tier === 2) {
-    softLockInput(3);
+    piiAttemptCount++;
+    pendingTier2Message = data;
+
+    if (piiAttemptCount >= 3) {
+      // Repeated PII attempts in one session — treat as an elevated
+      // pattern, not just an isolated message. Log it the same way
+      // Tier 3 incidents get preserved.
+      saveIncident({
+        input_text: data.input_text,
+        category: "REPEATED_PII_PATTERN",
+        confidence: data.confidence
+      });
+      document.getElementById("tier2Message").textContent =
+        `This is the ${piiAttemptCount}${piiAttemptCount === 3 ? "rd" : "th"} time personal info has come up in this conversation. That pattern has been noted for review.`;
+    } else {
+      document.getElementById("tier2Message").textContent =
+        "Personal details like this can be used to find you in real life. Take a moment before sending.";
+    }
+
+    startTier2Pause(10);
   }
   if (data.tier === 3) {
-    triggerLockdown();
+    // Save evidence server-side FIRST, before anything else happens.
+    // This runs the instant the risk is detected, so the record exists
+    // independent of the child's device — nothing that happens in the
+    // chat afterward (deleting messages, blocking, etc.) can remove it.
+    saveIncident(data);
+    triggerLockdown(data.category);
+  }
+}
+
+async function saveIncident(data) {
+  try {
+    const res = await fetch("/log_incident", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: data.input_text,
+        category: data.category,
+        confidence: data.confidence
+      })
+    });
+    const result = await res.json();
+    console.log("Evidence saved at", result.captured_at);
+  } catch (err) {
+    console.error("Could not save incident:", err);
   }
 }
 
@@ -177,23 +267,62 @@ function showBanner(cls, text) {
   banner.textContent = text;
 }
 
-function softLockInput(seconds) {
+function startTier2Pause(seconds) {
   const input = document.getElementById("msgInput");
+  const panel = document.getElementById("tier2Panel");
+  const sendAnywayBtn = panel.querySelector(".btn-send-anyway");
+
   input.disabled = true;
+  sendAnywayBtn.disabled = true;
+  sendAnywayBtn.style.opacity = "0.4";
+  panel.classList.add("show");
+
   let remaining = seconds;
-  const original = input.placeholder;
+  const original = sendAnywayBtn.textContent;
+  sendAnywayBtn.textContent = `Send anyway (${remaining}s)`;
+
   const interval = setInterval(() => {
-    input.placeholder = `Checking message... sending in ${remaining}s`;
     remaining--;
-    if (remaining < 0) {
+    sendAnywayBtn.textContent = `Send anyway (${remaining}s)`;
+    if (remaining <= 0) {
       clearInterval(interval);
-      input.disabled = false;
-      input.placeholder = original;
+      // The input stays disabled and nothing auto-sends. The teen now has
+      // to make an ACTIVE choice — this is the whole point: a passive
+      // timer is easy to wait out and ignore, an explicit click is not.
+      sendAnywayBtn.disabled = false;
+      sendAnywayBtn.style.opacity = "1";
+      sendAnywayBtn.textContent = "Send anyway";
     }
   }, 1000);
 }
 
-function triggerLockdown() {
+function handleSendAnyway() {
+  // The teen actively chose to proceed. We don't block them — Sentinel
+  // preserves autonomy — but the message is now genuinely THEIRS,
+  // not something that slipped through a timer while they weren't looking.
+  const input = document.getElementById("msgInput");
+  input.disabled = false;
+  document.getElementById("tier2Panel").classList.remove("show");
+  pendingTier2Message = null;
+}
+
+function handleDontSend() {
+  const input = document.getElementById("msgInput");
+  input.disabled = false;
+  input.value = "";
+  document.getElementById("tier2Panel").classList.remove("show");
+  pendingTier2Message = null;
+}
+
+function triggerLockdown(category) {
+  const reasons = {
+    "CONTACT_SWITCHING": "This conversation included a request to move to another app.<br>Pausing chat and notifying a parent.",
+    "SEXUAL_SOLICITATION": "This conversation included explicit sexual content.<br>Pausing chat and notifying a parent immediately.",
+    "THREAT_COERCION": "This conversation included threatening or coercive language.<br>Pausing chat and notifying a parent immediately.",
+  };
+  document.getElementById("lockdownReason").innerHTML =
+    reasons[category] || "This conversation was flagged as critical risk.<br>Pausing chat and notifying a parent.";
+
   document.getElementById("chatWindow").classList.add("tier3-blur");
   const overlay = document.getElementById("lockdownOverlay");
   overlay.classList.add("show");

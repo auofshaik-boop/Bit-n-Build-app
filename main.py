@@ -12,7 +12,9 @@ Needs one environment variable set on Render: HF_TOKEN
 """
 
 import os
+import json
 import requests
+from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -27,6 +29,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Where captured Tier 3 incidents get saved.
+# NOTE: on Render's free tier, this file resets whenever the app restarts or
+# redeploys — fine for a hackathon demo, but a real version would use a
+# proper database so evidence survives restarts.
+INCIDENT_LOG_FILE = "incidents.json"
+
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HF_API_URL = "https://router.huggingface.co/hf-inference/models/facebook/bart-large-mnli"
 
@@ -34,27 +42,53 @@ CANDIDATE_LABELS = [
     "sharing personal information like address or school",
     "asking to switch to another app like Snapchat, WhatsApp, or phone number",
     "manipulative pressure, flattery, or secrecy",
+    "explicit sexual content or sexual solicitation",
+    "threats, coercion, blackmail, or intimidation to force compliance",
     "normal safe conversation",
 ]
 
+# Two dimensions on purpose:
+#   "tier"       — decides WHAT the app does (which UI behavior fires)
+#   "risk_class" — explains WHY, grouping categories by what kind of risk
+#                  they represent. Contact-switching is a step TOWARD future
+#                  harm (an escalation pathway); sexual content and threats
+#                  ARE the harm, happening right now. Same tier/response
+#                  severity, different underlying nature — worth knowing
+#                  even though the immediate action taken is the same.
 LABEL_TO_TIER = {
     "sharing personal information like address or school": {
         "category": "PII_SHARING",
+        "risk_class": "PRIVACY_RISK",
         "tier": 2,
-        "action": "Soft pause: dim the input box, show a countdown, explain why.",
+        "action": "10-second pause with a real explanation, then requires an active 'Send anyway' or 'Don't send' choice — no auto-send.",
     },
     "asking to switch to another app like Snapchat, WhatsApp, or phone number": {
         "category": "CONTACT_SWITCHING",
+        "risk_class": "ESCALATION_PATHWAY",
         "tier": 3,
         "action": "Hard safety pause: show a calm warning message, then minimize chat and alert parent.",
     },
     "manipulative pressure, flattery, or secrecy": {
         "category": "GROOMING_PRESSURE",
+        "risk_class": "MANIPULATION",
         "tier": 1,
         "action": "Non-intrusive tip overlay for the minor. No interruption.",
     },
+    "explicit sexual content or sexual solicitation": {
+        "category": "SEXUAL_SOLICITATION",
+        "risk_class": "HARMFUL_CONTENT",
+        "tier": 3,
+        "action": "Immediate hard safety pause: evidence saved instantly, chat minimized, parent alerted — treated as the highest-severity category.",
+    },
+    "threats, coercion, blackmail, or intimidation to force compliance": {
+        "category": "THREAT_COERCION",
+        "risk_class": "HARMFUL_CONTENT",
+        "tier": 3,
+        "action": "Immediate hard safety pause: evidence saved instantly, chat minimized, parent alerted — treated as the highest-severity category.",
+    },
     "normal safe conversation": {
         "category": "SAFE_CHAT",
+        "risk_class": "SAFE",
         "tier": 0,
         "action": "No action.",
     },
@@ -63,6 +97,54 @@ LABEL_TO_TIER = {
 
 class Message(BaseModel):
     text: str
+
+
+class Incident(BaseModel):
+    text: str
+    category: str
+    confidence: float
+
+
+def save_incident(incident: dict):
+    """Append one incident to the log file, creating it if needed."""
+    incidents = []
+    if os.path.exists(INCIDENT_LOG_FILE):
+        try:
+            with open(INCIDENT_LOG_FILE, "r") as f:
+                incidents = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            incidents = []
+    incidents.append(incident)
+    with open(INCIDENT_LOG_FILE, "w") as f:
+        json.dump(incidents, f, indent=2)
+
+
+@app.post("/log_incident")
+def log_incident(incident: Incident):
+    """
+    Saves a copy of a Tier 3 (critical risk) message the INSTANT it's
+    detected — independent of the child's device or chat app. Even if the
+    other person deletes their messages afterward, this record already
+    exists here and can't be erased by anything happening in the chat.
+    """
+    record = {
+        "text": incident.text,
+        "category": incident.category,
+        "confidence": incident.confidence,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+    }
+    save_incident(record)
+    return {"status": "saved", "captured_at": record["captured_at"]}
+
+
+@app.get("/incidents")
+def get_incidents():
+    """View all captured incidents — this is what a parent-facing view
+    would read from in a full version of Sentinel."""
+    if not os.path.exists(INCIDENT_LOG_FILE):
+        return {"incidents": []}
+    with open(INCIDENT_LOG_FILE, "r") as f:
+        return {"incidents": json.load(f)}
 
 
 @app.post("/analyze")
@@ -93,6 +175,7 @@ def analyze(message: Message):
         "matched_label": top_label,
         "confidence": round(top_score, 3),
         "category": tier_info["category"],
+        "risk_class": tier_info["risk_class"],
         "tier": tier_info["tier"],
         "recommended_action": tier_info["action"],
         "all_scores": [
