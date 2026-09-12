@@ -57,14 +57,21 @@ SAFE_LABEL = "normal safe conversation"
 # hit some high absolute bar. Random/uniform guessing across 6 labels would
 # average out to about 1/6 ≈ 17% each. So these thresholds are set just
 # above that noise floor, to catch genuinely directionless guesses, NOT to
-# filter out real detections that happen to score under 50%. The earlier,
-# higher thresholds (0.55/0.45/0.30) were throwing away correct answers —
-# a message that WINS the top spot has already beaten "safe" head-to-head,
-# even at a score like 35%.
+# filter out real detections that happen to score under 50%.
+#
+# GROOMING_PRESSURE was lowered from 0.40 -> 0.25 after testing showed real
+# examples slipping through at 0.40 (e.g. "you're so much more mature than
+# other people your age" scored 0.339; "don't tell your parents, it's just
+# between us" scored below 0.40 on this label specifically, even though the
+# model's own raw top guess for that message was "safe" at 0.518). Since
+# Tier 1's response is just a non-intrusive tip — not a lockdown or parent
+# alert — a lower threshold here is low-risk even if it produces more false
+# positives: worst case is an unnecessary tip, not a false alarm to a
+# parent. RE-TEST after this change to confirm both examples now pass.
 CATEGORY_THRESHOLDS = {
     "asking for personal information like home address, school name, or real name": 0.30,
     "asking to switch to another app like Snapchat, WhatsApp, or phone number": 0.30,
-    "pressuring someone to keep a secret from their parents, isolating them from friends and family, or giving unusual personal compliments to build trust": 0.40,
+    "pressuring someone to keep a secret from their parents, isolating them from friends and family, or giving unusual personal compliments to build trust": 0.25,
     "explicit sexual content or sexual solicitation": 0.30,
     "threats, coercion, blackmail, or intimidation to force compliance": 0.55,
 }
@@ -157,9 +164,9 @@ def save_incident(incident: dict):
 
 
 def _safe_response(text: str, confidence: float = 1.0, note: str = None, error: str = None, raw_response=None):
-    """Build a 'treat as safe' response. Used by every fallback path below,
-    so a short message, a network hiccup, or a slow-loading model all fail
-    to Tier 0 (safe) instead of ever accidentally defaulting to Tier 3."""
+    """Build a 'treat as safe' response. Used by fallback paths below, so a
+    network hiccup or a slow-loading model fails to Tier 0 (safe) instead of
+    ever accidentally defaulting to Tier 3."""
     tier_info = LABEL_TO_TIER[SAFE_LABEL]
     response = {
         "input_text": text,
@@ -212,13 +219,16 @@ def get_incidents():
 def analyze(message: Message):
     text = message.text.strip()
 
-    # --- FIX 1: short-message pre-filter -----------------------------------
-    # A message like "Hey" or "lol" has no real content to classify. Rather
-    # than forcing the model to guess a "danger" category for near-empty
-    # text, treat anything at or under 2 words as safe and skip the API
-    # call entirely (also saves you a Hugging Face request).
-    if len(text.split()) <= 2:
-        return _safe_response(text, confidence=1.0, note="Skipped model call: message too short to meaningfully classify.")
+    # NOTE: an earlier version of this function skipped the AI model
+    # entirely for messages of 2 words or fewer, to stop "Hey"/"lol" from
+    # misfiring. That shortcut was REMOVED — it created a worse blind spot:
+    # a genuinely harmful 2-word message (e.g. "send nudes", "give address")
+    # would have skipped classification entirely and auto-returned Safe.
+    # The threshold + severity-priority system below already handles short
+    # harmless messages correctly on its own (that's what actually produced
+    # the clean "Hey/lol/wyd -> Safe" results during testing), so the
+    # word-count shortcut was redundant AND unsafe. Every message, however
+    # short, now goes through the real classification path below.
 
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     payload = {
@@ -226,7 +236,7 @@ def analyze(message: Message):
         "parameters": {"candidate_labels": CANDIDATE_LABELS},
     }
 
-    # --- FIX 2: network/timeout errors fail SAFE, not Tier 3 ---------------
+    # Network/timeout errors fail SAFE, not Tier 3.
     try:
         response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=30)
         result = response.json()
@@ -247,15 +257,10 @@ def analyze(message: Message):
     top_label = result[0]["label"]
     top_score = result[0]["score"]
 
-    # --- FIX 3: severity-priority selection, not just raw top-1 -------------
-    # Build a quick lookup of every category's score, then walk through
-    # CATEGORY_PRIORITY (most severe first). The first category that clears
-    # ITS OWN threshold wins — even if a less severe category scored higher
-    # in the raw model output. This stops genuinely dangerous messages from
-    # being demoted just because a milder category edged them out by a few
-    # points, which real testing showed happening in practice (e.g. "send
-    # me a pic right now" scoring slightly higher for generic "manipulative
-    # pressure" than for "sexual solicitation").
+    # Severity-priority selection, not just raw top-1: build a quick lookup
+    # of every category's score, then walk through CATEGORY_PRIORITY (most
+    # severe first). The first category that clears ITS OWN threshold wins
+    # — even if a less severe category scored higher in the raw output.
     scores_by_label = {r["label"]: r["score"] for r in result}
 
     selected_label = None
