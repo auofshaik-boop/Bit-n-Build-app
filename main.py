@@ -41,7 +41,7 @@ HF_API_URL = "https://router.huggingface.co/hf-inference/models/facebook/bart-la
 CANDIDATE_LABELS = [
     "asking for personal information like home address, school name, or real name",
     "asking to switch to another app like Snapchat, WhatsApp, or phone number",
-    "manipulative pressure, flattery, or secrecy",
+    "pressuring someone to keep a secret from their parents, isolating them from friends and family, or giving unusual personal compliments to build trust",
     "explicit sexual content or sexual solicitation",
     "threats, coercion, blackmail, or intimidation to force compliance",
     "normal safe conversation",
@@ -64,10 +64,25 @@ SAFE_LABEL = "normal safe conversation"
 CATEGORY_THRESHOLDS = {
     "asking for personal information like home address, school name, or real name": 0.20,
     "asking to switch to another app like Snapchat, WhatsApp, or phone number": 0.20,
-    "manipulative pressure, flattery, or secrecy": 0.20,
+    "pressuring someone to keep a secret from their parents, isolating them from friends and family, or giving unusual personal compliments to build trust": 0.40,
     "explicit sexual content or sexual solicitation": 0.15,
     "threats, coercion, blackmail, or intimidation to force compliance": 0.15,
 }
+
+# When more than one category clears its threshold, we deliberately prefer
+# the MORE SEVERE one, even if a less severe category happened to score a
+# few points higher. This directly reflects the product's safety
+# philosophy: the cost of under-classifying a genuinely dangerous message
+# (e.g. showing a soft "grooming" tip instead of triggering the Tier 3
+# evidence-save + parent alert) is far worse than occasionally showing a
+# stronger response than strictly necessary. Ordered most severe first.
+CATEGORY_PRIORITY = [
+    "explicit sexual content or sexual solicitation",
+    "threats, coercion, blackmail, or intimidation to force compliance",
+    "asking to switch to another app like Snapchat, WhatsApp, or phone number",
+    "asking for personal information like home address, school name, or real name",
+    "pressuring someone to keep a secret from their parents, isolating them from friends and family, or giving unusual personal compliments to build trust",
+]
 
 # Two dimensions on purpose:
 #   "tier"       — decides WHAT the app does (which UI behavior fires)
@@ -90,7 +105,7 @@ LABEL_TO_TIER = {
         "tier": 3,
         "action": "Hard safety pause: show a calm warning message, then minimize chat and alert parent.",
     },
-    "manipulative pressure, flattery, or secrecy": {
+    "pressuring someone to keep a secret from their parents, isolating them from friends and family, or giving unusual personal compliments to build trust": {
         "category": "GROOMING_PRESSURE",
         "risk_class": "MANIPULATION",
         "tier": 1,
@@ -232,17 +247,32 @@ def analyze(message: Message):
     top_label = result[0]["label"]
     top_score = result[0]["score"]
 
-    # --- FIX 3: per-category confidence threshold ---------------------------
-    # Zero-shot models always produce a "top" label, even when none of the
-    # candidates genuinely apply. If the top score doesn't clear the
-    # threshold FOR THAT SPECIFIC CATEGORY, don't trust it — fall back to
-    # safe instead of escalating on a low-confidence guess. High-severity
-    # categories use a lower bar on purpose (see CATEGORY_THRESHOLDS above).
-    if top_label != SAFE_LABEL:
-        required_threshold = CATEGORY_THRESHOLDS.get(top_label, 0.55)
-        if top_score < required_threshold:
-            top_label = SAFE_LABEL
-            top_score = result[0]["score"]  # keep the original score for transparency
+    # --- FIX 3: severity-priority selection, not just raw top-1 -------------
+    # Build a quick lookup of every category's score, then walk through
+    # CATEGORY_PRIORITY (most severe first). The first category that clears
+    # ITS OWN threshold wins — even if a less severe category scored higher
+    # in the raw model output. This stops genuinely dangerous messages from
+    # being demoted just because a milder category edged them out by a few
+    # points, which real testing showed happening in practice (e.g. "send
+    # me a pic right now" scoring slightly higher for generic "manipulative
+    # pressure" than for "sexual solicitation").
+    scores_by_label = {r["label"]: r["score"] for r in result}
+
+    selected_label = None
+    for candidate_label in CATEGORY_PRIORITY:
+        candidate_score = scores_by_label.get(candidate_label, 0.0)
+        if candidate_score >= CATEGORY_THRESHOLDS[candidate_label]:
+            selected_label = candidate_label
+            top_score = candidate_score
+            break
+
+    if selected_label is not None:
+        top_label = selected_label
+    elif top_label != SAFE_LABEL:
+        # Nothing cleared its severity-priority threshold, and the model's
+        # own raw top pick also wasn't safe — treat as safe rather than
+        # trust a low-confidence guess.
+        top_label = SAFE_LABEL
 
     tier_info = LABEL_TO_TIER[top_label]
 
